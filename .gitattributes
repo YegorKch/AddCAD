@@ -1,0 +1,9 @@
+# Файл, который реально грузится в AutoCAD, — в CP1251.
+# Держим байт в байт: никакой конвертации переводов строк.
+AddCAD/Плагин/AddCAD.bundle/Contents/Ramki/Ramki.lsp -text
+
+# Бинарники
+*.dwg  binary
+*.cuix binary
+*.zip  binary
+*.arx  binary
