@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """Сборка GeoRamki.cuix.
 
-Формат скопирован с двух заведомо рабочих файлов адаптации на этой машине:
-MDS.cuix (MDSTools) и menu GEO 0_15.cuix. Отсюда - BMP-иконки и UID
-со стандартными префиксами MMU_/RBNU_/XLS_/TBB_.
+Формат сверен с рабочими файлами адаптации AutoCAD: BMP-иконки
+и UID со стандартными префиксами MMU_/RBNU_/XLS_/TBB_.
 """
 import os
 import sys
@@ -108,7 +107,7 @@ rb = [HDR, '<RibbonRoot>\n', '  <RibbonPanelSourceCollection %s>\n' % NS,
       '      <RibbonRow UID="RBNU_GR_ROW1">\n',
       '        %s\n' % REV]
 
-# выпадающий список форматов - как "Рамка и штамп" в menuGEO
+# выпадающий список форматов
 rb.append('        <RibbonSplitButton UID="RBNU_GR_SPLIT" '
           'Id="AcRibbonSplitButton" Text="Рамка и штамп" '
           'SmallImage="A3_gor_16.bmp" LargeImage="A3_gor_32.bmp" '

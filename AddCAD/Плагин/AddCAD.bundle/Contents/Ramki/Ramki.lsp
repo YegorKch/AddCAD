@@ -27,7 +27,7 @@
 (vl-load-com)
 
 ;;; --- где лежат блоки --------------------------------------------------
-;;; Ищем по списку кандидатов: сначала свой bundle, потом оригинал menuGEO.
+;;; Ищем по списку кандидатов: пользовательская установка, затем общая.
 
 (defun gr:dir ( / cands)
   (if (and *gr:dir* (findfile (strcat *gr:dir* "A3_gor.dwg")))
@@ -38,8 +38,7 @@
           (strcat (getenv "APPDATA")
                   "\\Autodesk\\ApplicationPlugins\\AddCAD.bundle\\Contents\\Ramki\\Blocks\\")
           (strcat (getenv "ProgramData")
-                  "\\Autodesk\\ApplicationPlugins\\AddCAD.bundle\\Contents\\Ramki\\Blocks\\")
-          "C:\\Program Files (x86)\\menuGEO\\support\\"))
+                  "\\Autodesk\\ApplicationPlugins\\AddCAD.bundle\\Contents\\Ramki\\Blocks\\")))
       (setq *gr:dir* nil)
       (foreach c cands
         (if (and (null *gr:dir*) (findfile (strcat c "A3_gor.dwg")))
