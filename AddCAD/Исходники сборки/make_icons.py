@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Иконки в формате BMP 32 бита - как их ждёт лента AutoCAD
-(16x16 = 54 байта заголовка + 1024 байта пикселей = 1078 байт)."""
+"""Иконки ленты AddCAD - PNG с альфа-каналом, 16x16 и 32x32.
+
+Рисуются вручную по пикселям: PIL на машине нет, а тащить зависимость
+ради четырёх примитивов ни к чему. PNG, а не BMP: прозрачные пиксели
+BMP лента рисует чёрным, и вокруг иконки появляется чёрная плашка.
+"""
 import os
-import sys
 import struct
+import sys
+import zlib
 
 OUT = sys.argv[1]
 os.makedirs(OUT, exist_ok=True)
@@ -55,6 +60,29 @@ class Img(object):
                                    x + rx * scale + scale - 1,
                                    y + ry * scale + scale - 1, c)
 
+    def png(self):
+        """PNG с альфа-каналом.
+
+        Лента AutoCAD рисует прозрачные пиксели BMP чёрным - вокруг иконки
+        появляется чёрная плашка. PNG она понимает правильно, поэтому
+        картинки делаем в нём. Пишем вручную, через zlib: PIL на машине нет.
+        """
+        raw = b''
+        for y in range(self.h):
+            raw += b'\x00'
+            for (r, g, b, a) in self.px[y]:
+                raw += bytes((r, g, b, a))
+
+        def chunk(tag, data):
+            return (struct.pack('>I', len(data)) + tag + data +
+                    struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff))
+
+        return (b'\x89PNG\r\n\x1a\n' +
+                chunk(b'IHDR', struct.pack('>IIBBBBB', self.w, self.h,
+                                           8, 6, 0, 0, 0)) +
+                chunk(b'IDAT', zlib.compress(raw, 9)) +
+                chunk(b'IEND', b''))
+
     def bmp(self):
         """32-битный BI_RGB BMP, строки снизу вверх, порядок BGRA."""
         rows = b''
@@ -73,7 +101,7 @@ def sheet_box(size, horizontal):
     return (0, 2, 15, 13) if horizontal else (2, 0, 13, 15)
 
 
-def draw(size, fmt, horizontal, stamp_only=False):
+def draw(size, fmt, horizontal, stamp_only=False, digit=True):
     im = Img(size, size)
     x0, y0, x1, y1 = sheet_box(size, horizontal)
     im.rect_fill(x0, y0, x1, y1, PAPER)
@@ -88,13 +116,13 @@ def draw(size, fmt, horizontal, stamp_only=False):
             yy = sy1 - sh + k * (sh // 3)
             for xx in range(sx1 - sw, sx1 + 1):
                 im.dot(xx, yy, INK)
-        if not stamp_only:
+        if not stamp_only and digit:
             im.glyph(fmt, x0 + 4, y0 + 5, 2, DIGIT)
     else:
         sw, sh = (6, 3) if not stamp_only else (9, 5)
         sx1, sy1 = x1 - 1, y1 - 1
         im.rect_fill(sx1 - sw, sy1 - sh, sx1, sy1, STAMP)
-        if not stamp_only:
+        if not stamp_only and digit:
             im.glyph(fmt, x0 + 2, y0 + 2, 2, DIGIT)
     return im
 
@@ -103,19 +131,26 @@ made = []
 for fmt in '01234':
     for horiz, suf in ((True, 'gor'), (False, 'vert')):
         for size in (32, 16):
-            name = 'A%s_%s_%d.bmp' % (fmt, suf, size)
+            name = 'A%s_%s_%d.png' % (fmt, suf, size)
             open(os.path.join(OUT, name), 'wb').write(
-                draw(size, fmt, horiz).bmp())
+                draw(size, fmt, horiz).png())
             made.append(name)
 
 for size in (32, 16):
-    name = 'shtamp_%d.bmp' % size
+    name = 'shtamp_%d.png' % size
     open(os.path.join(OUT, name), 'wb').write(
-        draw(size, '3', True, stamp_only=True).bmp())
+        draw(size, '3', True, stamp_only=True).png())
+    made.append(name)
+
+# Иконка кнопки-списка на ленте: рамка со штампом, но без цифры формата -
+# за кнопкой стоят все форматы сразу, конкретный номер там врал бы.
+for size in (32, 16):
+    name = 'ramka_%d.png' % size
+    open(os.path.join(OUT, name), 'wb').write(
+        draw(size, '3', True, digit=False).png())
     made.append(name)
 
 print('иконок:', len(made))
-print('размер 16x16:', os.path.getsize(os.path.join(OUT, 'A3_gor_16.bmp')),
-      'байт (в рабочем MDS.cuix - 1078)')
-print('размер 32x32:', os.path.getsize(os.path.join(OUT, 'A3_gor_32.bmp')),
+print('размер 16x16:', os.path.getsize(os.path.join(OUT, 'A3_gor_16.png')),
+      'байт | 32x32:', os.path.getsize(os.path.join(OUT, 'A3_gor_32.png')),
       'байт')

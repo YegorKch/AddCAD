@@ -7,6 +7,12 @@
 /*.fas
 /*.vlx
 
+# Промежуточный архив сборки: в репозиторий идёт только AddCAD-Setup.bat
+AddCAD/AddCAD-*.zip
+
+# Иконки генерируются make_icons.py при сборке
+AddCAD/icons/
+
 # Мусор ОС и AutoCAD
 Thumbs.db
 desktop.ini

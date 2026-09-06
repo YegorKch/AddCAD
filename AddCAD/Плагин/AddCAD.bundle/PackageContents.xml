@@ -2,16 +2,15 @@
 <ApplicationPackage SchemaVersion="1.0"
                     Name="AddCAD"
                     Description="Дополнительные инструменты для AutoCAD"
-                    AppVersion="1.0.0"
+                    AppVersion="1.1.0"
                     ProductCode="ID_79aea3a4-7006-4be3-9730-af198543ec2a">
   <Components>
     <RuntimeRequirements OS="Win64" />
     <ComponentEntry ComponentName="MyPaths" ModuleName="./Contents" AppDescription="Support Path" />
     <ComponentEntry ComponentName="MainUI" ModuleName="./Contents/AddCAD.cuix" LoadOnAutoCADStartup="True" />
 
-    <!-- Рамки: форматы А0-А4 и штамп -->
+    <!-- Рамки: форматы А0-А4 и штамп, строятся кодом -->
     <ComponentEntry ComponentName="RamkiPath" ModuleName="./Contents/Ramki" AppDescription="Support Path" />
-    <ComponentEntry ComponentName="RamkiBlocks" ModuleName="./Contents/Ramki/Blocks" AppDescription="Support Path" />
     <ComponentEntry ComponentName="Ramki" ModuleName="./Contents/Ramki/Ramki.lsp" LoadOnAutoCADStartup="True" />
   </Components>
 </ApplicationPackage>

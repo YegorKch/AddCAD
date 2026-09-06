@@ -1,6 +1,15 @@
 ;;; ======================================================================
 ;;;  AddCAD - Рамки
-;;;  Форматы А0-А4, горизонтальные и вертикальные, плюс штамп.
+;;;  Форматы А0-А4, альбомные и книжные, плюс штамп.
+;;;
+;;;  Рамки не хранятся файлами, а СТРОЯТСЯ КОДОМ по размерам стандарта:
+;;;  ГОСТ 2.301 (форматы листов) и ГОСТ 2.104 (основная надпись).
+;;;  Никаких DWG в комплекте - плагин целиком текстовый, работает
+;;;  в любой версии AutoCAD и не зависит от формата файлов блоков.
+;;;
+;;;  Для пользователя порядок работы не изменился: определение блока
+;;;  собирается на лету, дальше блок висит на курсоре, ставится точкой,
+;;;  масштабируется, взрывается, а определение вычищается из чертежа.
 ;;;
 ;;;  ЭТО ИСХОДНИК В UTF-8. В плагин файл кладётся перекодированным в CP1251:
 ;;;      iconv -f UTF-8 -t CP1251 Ramki_src_utf8.lsp > Ramki.lsp
@@ -14,8 +23,13 @@
 ;;;       алиас: ШТАМП, SHTAMP
 ;;;    АМАСШТАБ  (ASCALE)  - динамический масштаб или фиксированное значение
 ;;;       алиас: РАМКАМАСШТАБ, RAMKASCALE
+;;;    АВПИСАТЬ  (AFIT)    - подогнать надписи под свои графы
+;;;       алиас: ВПИСАТЬ
+;;;    АВТОВПИСАТЬ (AUTOFIT) - включить или выключить автоподгонку
 ;;;
-;;;    Р0Г..Р4В / R0G..R4V - быстрая вставка конкретного формата.
+;;;    Р0А..Р4А / Р0К..Р4К - быстрая вставка: альбомная и книжная.
+;;;       Латиницей - R0L..R4L и R0P..R4P. Прежние Р0Г / Р0В
+;;;       и R0G / R0V работают как синонимы.
 ;;;       Эти намеренно без префикса: они короткие по назначению,
 ;;;       а сочетание "буква-цифра-буква" и так почти не конфликтует.
 ;;;
@@ -26,151 +40,301 @@
 
 (vl-load-com)
 
-;;; --- где лежат блоки --------------------------------------------------
-;;; Ищем по списку кандидатов: пользовательская установка, затем общая.
+;;; ======================================================================
+;;;  РАЗМЕРЫ
+;;;  Здесь и только здесь лежат все числа. Менять геометрию - тут.
+;;; ======================================================================
 
-(defun gr:dir ( / cands)
-  (if (and *gr:dir* (findfile (strcat *gr:dir* "A3_gor.dwg")))
-    *gr:dir*
-    (progn
-      (setq cands
-        (list
-          (strcat (getenv "APPDATA")
-                  "\\Autodesk\\ApplicationPlugins\\AddCAD.bundle\\Contents\\Ramki\\Blocks\\")
-          (strcat (getenv "ProgramData")
-                  "\\Autodesk\\ApplicationPlugins\\AddCAD.bundle\\Contents\\Ramki\\Blocks\\")))
-      (setq *gr:dir* nil)
-      (foreach c cands
-        (if (and (null *gr:dir*) (findfile (strcat c "A3_gor.dwg")))
-          (setq *gr:dir* c)))
-      (if (null *gr:dir*)
-        (princ "\nAddCAD/Рамки: не найдена папка с блоками."))
-      *gr:dir*)))
+;;; Форматы по ГОСТ 2.301, мм: (имя ширина высота) для альбомной
+;;; ориентации; книжная получается перестановкой сторон.
+(setq *gr:fmts*
+  '(("0" 1189.0  841.0)
+    ("1"  841.0  594.0)
+    ("2"  594.0  420.0)
+    ("3"  420.0  297.0)
+    ("4"  297.0  210.0)))
 
-;;; --- сохранение / восстановление окружения ----------------------------
-;;; OSMODE намеренно не трогаем: привязки нужны при указании точки вставки.
+;;; Поля: слева 20 мм под подшивку, с остальных сторон по 5.
+(setq *gr:mleft* 20.0  *gr:medge* 5.0)
 
-(defun gr:save ()
-  (setq *gr:env* (list (getvar "CMDECHO")
-                       (getvar "ATTREQ")
-                       (getvar "ATTDIA")
-                       (getvar "CLAYER")))
-  (setvar "CMDECHO" 0)
-  (setvar "ATTREQ" 0)
-  (setvar "ATTDIA" 0))
+;;; Основная надпись: 185 x 55, правый нижний угол внутренней рамки.
+(setq *gr:sw* 185.0  *gr:sh* 55.0)
 
-(defun gr:restore ()
-  (if *gr:env*
-    (progn
-      (setvar "CMDECHO" (nth 0 *gr:env*))
-      (setvar "ATTREQ"  (nth 1 *gr:env*))
-      (setvar "ATTDIA"  (nth 2 *gr:env*))
-      (if (tblsearch "LAYER" (nth 3 *gr:env*))
-        (setvar "CLAYER" (nth 3 *gr:env*)))
-      (setq *gr:env* nil))))
+;;; Веса линий в сотых долях мм. Как в прежних блоках: обрез листа
+;;; заметнее, вся остальная графика тонкая. По ГОСТ основная линия
+;;; толще тонкой - если захочется строго, менять здесь.
+(setq *gr:lwsheet* 30  *gr:lwline* 9)
 
-;;; Если прервали Esc на этапе масштабирования, вставленный блок остаётся
-;;; висеть в чертеже. Считаем отмену отменой и убираем его.
-(defun gr:err (msg)
-  (if (and msg (not (wcmatch (strcase msg) "*BREAK*,*CANCEL*,*ОТМЕНА*")))
-    (princ (strcat "\nОшибка: " msg)))
-  (if (and *gr:pending* (entget *gr:pending*))
-    (entdel *gr:pending*))
-  (setq *gr:pending* nil)
-  (gr:restore)
-  (setq *error* *gr:olderr* *gr:olderr* nil)
-  (princ))
-
-;;; --- надписи "Лист / Листов / 1 / 1" ----------------------------------
-;;; В штампе эти ячейки нарисованы, но пустые - в исходных DWG текста нет.
-;;; Дочерчиваем его сами после взрыва рамки, сами файлы не трогаем.
+;;; Текст: стиль и высоты.
 ;;;
-;;; Ячейки находим геометрически: в правой части штампа есть ровно одна
-;;; пара вертикальных отрезков длиной 15 на расстоянии 15 друг от друга.
-;;; Поэтому код работает для всех форматов, где штамп смещён по-разному,
-;;; и не зависит ни от точки вставки, ни от масштаба.
+;;; Стиль у плагина свой, "AddCAD", а не общий "ГОСТ". Причина: в чужом
+;;; чертеже стиль с таким именем может быть заведён под любой шрифт,
+;;; и надписи рамки унаследовали бы его вид.
+;;;
+;;; Шрифты перечислены по убыванию желаемости. GOST_Common ставится вместе
+;;; с некоторыми надстройками и есть не везде; isocpeur идёт в комплекте
+;;; самого AutoCAD и по начертанию ближе всего к ГОСТ 2.304; simplex.shx -
+;;; последняя подстраховка, он есть всегда.
+(setq *gr:style* "AddCAD"
+      *gr:fonts* '("GOST_Common Italic.ttf" "isocpeur.ttf" "simplex.shx")
+      *gr:h1*     3.0        ; подписи граф и значения
+      *gr:h2*     2.5        ; метка формата под рамкой
+      *gr:hbig*   4.0        ; обозначение документа - крупнее
+      *gr:pad*    1.0)       ; поле от текста до линии ячейки
 
-(defun gr:newlines (prev sc / e d s p lines tol len)
-  (setq tol (* 0.02 sc)
-        len (* 15.0 sc)
-        lines '()
-        e prev)
-  (while (setq e (if e (entnext e) (entnext)))
-    (setq d (entget e))
-    (if (= (cdr (assoc 0 d)) "LINE")
-      (progn
-        (setq s (cdr (assoc 10 d))
-              p (cdr (assoc 11 d)))
-        (if (and (< (abs (- (car s) (car p))) tol)
-                 (< (abs (- (abs (- (cadr s) (cadr p))) len)) tol))
-          (setq lines
-                (cons (list (car s)
-                            (min (cadr s) (cadr p))
-                            (max (cadr s) (cadr p)))
-                      lines))))))
-  lines)
+;;; ======================================================================
+;;;  ПРИМИТИВЫ
+;;;  Всё строится на слое 0, чтобы блок наследовал слой вставки: тогда
+;;;  АРАМКА кладёт рамку на "рамка", а АШТАМП штамп на "Штамп".
+;;; ======================================================================
 
-(defun gr:grid (lines sc / res tol len)
-  (setq tol (* 0.02 sc) len (* 15.0 sc) res nil)
-  (foreach a lines
-    (foreach b lines
-      (if (and (null res)
-               (< (abs (- (- (car b) (car a)) len)) tol)
-               (< (abs (- (cadr a) (cadr b))) tol))
-        (setq res a))))
-  res)
-
-(defun gr:label (x y sc txt)
+(defun gr:ln (x1 y1 x2 y2 lw)
   (entmake
-    (list '(0 . "MTEXT")
+    (list '(0 . "LINE")
           '(100 . "AcDbEntity")
-          (cons 8 "рамка")
-          '(100 . "AcDbMText")
-          (cons 10 (list x y 0.0))
-          (cons 40 (* 3.0 sc))
-          (cons 41 0.0)
-          (cons 71 5)                    ; привязка: центр по обеим осям
-          (cons 7 "ГОСТ")
-          (cons 1 (strcat "{\\T0.9;" txt "}")))))
+          '(8 . "0")
+          (cons 370 lw)
+          '(100 . "AcDbLine")
+          (list 10 x1 y1 0.0)
+          (list 11 x2 y2 0.0))))
 
-(defun gr:addlabels (prev sc / g ymid ytop ybot xl xr)
-  (if (setq g (gr:grid (gr:newlines prev sc) sc))
-    (progn
-      (setq ymid (+ (cadr g) (* 10.0 sc))
-            ytop (/ (+ (caddr g) ymid) 2.0)
-            ybot (/ (+ ymid (cadr g)) 2.0)
-            xl   (- (car g) (* 7.5 sc))
-            xr   (+ (car g) (* 7.5 sc)))
-      (gr:label xl ytop sc "Лист")
-      (gr:label xr ytop sc "Листов")
-      (gr:label xl ybot sc "1")
-      (gr:label xr ybot sc "1")
-      T)))
-
-;;; --- вставка ----------------------------------------------------------
-;;; PAUSE отдаёт указание точки самой команде -ВСТАВИТЬ, поэтому блок
-;;; висит на курсоре и сразу видно, как он встанет.
+;;; Свой текстовый стиль создаём сами: без него надписи ушли бы в Standard
+;;; с его временами новыми романами.
 ;;;
-;;; *gr:scale* = nil    - динамический режим: после вставки сразу МАСШТАБ
-;;; *gr:scale* = число  - фиксированный: масштаб задаётся до точки вставки,
-;;;                       и на курсоре блок уже нужного размера.
-;;;
-;;; command вызывается напрямую: обернуть его в vl-catch-all-apply нельзя,
-;;; AutoLISP отвечает "неверная порядковая функция: COMMAND".
+;;; ВАЖНО: вызывать только ДО открытия определения блока. entmake записи
+;;; таблицы стилей между BLOCK и ENDBLK рвёт сборку: линии пропадают,
+;;; тексты вываливаются в модель, а сам блок так и не создаётся.
 
-(defun gr:insert (name / dir file src prev ent pt sc)
-  (setq dir (gr:dir))
-  (if (null dir)
-    nil
+;;; Первый шрифт из списка, который реально есть на машине. Шрифты AutoCAD
+;;; лежат в его папке fonts и находятся через findfile, шрифты Windows -
+;;; нет, поэтому их проверяем прямым путём.
+(defun gr:font ( / win res)
+  (setq win (strcat (getenv "WINDIR") "\\Fonts\\"))
+  (foreach f *gr:fonts*
+    (if (and (null res) (or (findfile f) (findfile (strcat win f))))
+      (setq res f)))
+  (if res res "txt.shx"))
+
+(defun gr:mkstyle ( / f e d)
+  (setq f (gr:font))
+  (cond
+    ;; своего стиля ещё нет - создаём
+    ((null (tblsearch "STYLE" *gr:style*))
+     (entmake
+       (list '(0 . "STYLE")
+             '(100 . "AcDbSymbolTableRecord")
+             '(100 . "AcDbTextStyleTableRecord")
+             (cons 2 *gr:style*)
+             (cons 70 0)
+             (cons 40 0.0)               ; высота задаётся объектом
+             (cons 41 1.0)
+             (cons 50 0.0)
+             (cons 71 0)
+             (cons 42 2.5)
+             (cons 3 f))))
+    ;; стиль есть, но шрифт другой - чертёж мог прийти с машины, где
+    ;; нужного шрифта не было. Возвращаем на место, стиль-то наш.
+    ((and (setq e (tblobjname "STYLE" *gr:style*))
+          (setq d (entget e))
+          (/= (strcase (cdr (assoc 3 d))) (strcase f)))
+     (entmod (subst (cons 3 f) (assoc 3 d) d))))
+  (setq *gr:stl*
+    (if (tblsearch "STYLE" *gr:style*) *gr:style* (getvar "TEXTSTYLE"))))
+
+;;; Текст по центру прямоугольной ячейки.
+;;;   tr - коэффициент сжатия строки (\T в мтексте): длинные подписи
+;;;        вроде "Должность" иначе не влезают в графу;
+;;;   wd - ширина текстового блока, 0.0 = не ограничивать.
+;;;
+;;; Привязка 71=5 - середина по центру: точка вставки лежит ровно
+;;; в центре ячейки, поэтому текст растёт от неё симметрично в обе
+;;; стороны. Специалист вписывает своё - надпись остаётся
+;;; отцентрованной, а заданная ширина не даёт ей вылезти за линии:
+;;; длинная строка переносится, а не уезжает наружу.
+(defun gr:cell (x1 y1 x2 y2 h tr wd txt xd)
+  (entmake
+    (append
+      (list '(0 . "MTEXT")
+            '(100 . "AcDbEntity")
+            '(8 . "0")
+            '(100 . "AcDbMText")
+            (list 10 (/ (+ x1 x2) 2.0) (/ (+ y1 y2) 2.0) 0.0)
+            (cons 40 h)
+            (cons 41 wd)
+            (cons 71 5)                  ; привязка: середина по центру
+            (cons 7 (if *gr:stl* *gr:stl* (getvar "TEXTSTYLE")))
+            (cons 1 (strcat "{\\T" (rtos tr 2 2) ";" txt "}")))
+      (if xd (list xd)))))
+
+;;; Заготовка под заполнение: слово "ТЕКСТ" по центру ячейки. Ширина
+;;; блока - ширина ячейки минус поля, чтобы вписанное не касалось линий.
+;;;
+;;; В тексте прячем расширенные данные: размеры своей ячейки и исходную
+;;; высоту шрифта. По ним команда АВПИСАТЬ потом ужимает надпись, если
+;;; вписали много. Тип 1041 выбран намеренно - это "расстояние", AutoCAD
+;;; масштабирует такие значения вместе с объектом, поэтому в рамке
+;;; масштаба 100 они останутся верными.
+(defun gr:fill (x1 y1 x2 y2 h / uw uh)
+  (setq uw (max 1.0 (- (- x2 x1) (* 2.0 *gr:pad*)))    ; полезная ширина
+        uh (max 1.0 (- (- y2 y1) (* 2.0 *gr:pad*))))   ; полезная высота
+  (gr:cell x1 y1 x2 y2 h 0.9 uw
+           "ТЕКСТ"
+           (list -3 (list "ADDCAD"
+                          (cons 1000 "cell")
+                          (cons 1041 uw)      ; ширина за вычетом полей
+                          (cons 1041 uh)      ; высота за вычетом полей
+                          (cons 1041 h)))))   ; исходная высота шрифта
+
+;;; ======================================================================
+;;;  ОСНОВНАЯ НАДПИСЬ
+;;;
+;;;  Сетка 185 x 55, координаты от левого нижнего угла штампа.
+;;;
+;;;  Левый блок 65 мм - одиннадцать строк по 5 мм, колонки 17 / 23 / 15 / 10
+;;;  (Должность, Ф.И.О., Подпись, Дата).
+;;;
+;;;  Правая часть 120 мм:
+;;;      y 40..55  обозначение документа
+;;;      y 30..40  наименование
+;;;      y 15..30  слева 70 мм, справа три графы 15 / 15 / 20
+;;;                с делением на заголовок (25..30) и значение (15..25)
+;;;      y  0..15  слева 70 мм, справа 50 мм
+;;; ======================================================================
+
+(setq *gr:cols* '(17.0 40.0 55.0 65.0))   ; вертикали левого блока
+
+(defun gr:stamp (ox oy / y w h)
+  (setq w (+ ox *gr:sw*) h (+ oy *gr:sh*))
+
+  ;; --- контур ----------------------------------------------------------
+  (gr:ln ox oy w oy *gr:lwline*)
+  (gr:ln ox h w h *gr:lwline*)
+  (gr:ln ox oy ox h *gr:lwline*)
+  (gr:ln w oy w h *gr:lwline*)
+
+  ;; --- левый блок: строки по 5 мм и четыре колонки ----------------------
+  (setq y 5.0)
+  (while (< y *gr:sh*)
+    (gr:ln ox (+ oy y) (+ ox 65.0) (+ oy y) *gr:lwline*)
+    (setq y (+ y 5.0)))
+  (foreach x *gr:cols*
+    (gr:ln (+ ox x) oy (+ ox x) h *gr:lwline*))
+
+  ;; --- правая часть -----------------------------------------------------
+  (foreach y '(15.0 30.0 40.0)
+    (gr:ln (+ ox 65.0) (+ oy y) w (+ oy y) *gr:lwline*))
+  (gr:ln (+ ox 135.0) oy (+ ox 135.0) (+ oy 30.0) *gr:lwline*)
+  (gr:ln (+ ox 135.0) (+ oy 25.0) w (+ oy 25.0) *gr:lwline*)
+  (gr:ln (+ ox 150.0) (+ oy 15.0) (+ ox 150.0) (+ oy 30.0) *gr:lwline*)
+  (gr:ln (+ ox 165.0) (+ oy 15.0) (+ ox 165.0) (+ oy 30.0) *gr:lwline*)
+
+  ;; --- подписи граф ------------------------------------------------------
+  ;; строка заголовков левого блока - между 30 и 35
+  (gr:cell (+ ox  0.0) (+ oy 30.0) (+ ox 17.0) (+ oy 35.0) *gr:h1* 0.75 0.0 "Должность" nil)
+  (gr:cell (+ ox 17.0) (+ oy 30.0) (+ ox 40.0) (+ oy 35.0) *gr:h1* 1.00 0.0 "Ф.И.О." nil)
+  (gr:cell (+ ox 40.0) (+ oy 30.0) (+ ox 55.0) (+ oy 35.0) *gr:h1* 0.90 0.0 "Подпись" nil)
+  (gr:cell (+ ox 55.0) (+ oy 30.0) (+ ox 65.0) (+ oy 35.0) *gr:h1* 0.90 0.0 "Дата" nil)
+
+  ;; лист и количество листов: заголовки и значения по умолчанию
+  (gr:cell (+ ox 135.0) (+ oy 25.0) (+ ox 150.0) (+ oy 30.0) *gr:h1* 0.90 0.0 "Лист" nil)
+  (gr:cell (+ ox 150.0) (+ oy 25.0) (+ ox 165.0) (+ oy 30.0) *gr:h1* 0.90 0.0 "Листов" nil)
+  (gr:cell (+ ox 135.0) (+ oy 15.0) (+ ox 150.0) (+ oy 25.0) *gr:h1* 0.90 0.0 "1" nil)
+  (gr:cell (+ ox 150.0) (+ oy 15.0) (+ ox 165.0) (+ oy 25.0) *gr:h1* 0.90 0.0 "1" nil)
+
+  ;; --- заготовки под заполнение ------------------------------------------
+  ;; Пустые графы правой части заполняет специалист. Оставляем в них
+  ;; видимое слово "ТЕКСТ": иначе непонятно, куда писать, да и попасть
+  ;; курсором в пустую ячейку сложнее, чем щёлкнуть по надписи.
+  (gr:fill (+ ox  65.0) (+ oy 40.0) (+ ox 185.0) (+ oy 55.0) *gr:hbig*)
+  (gr:fill (+ ox  65.0) (+ oy 30.0) (+ ox 185.0) (+ oy 40.0) *gr:h1*)
+  (gr:fill (+ ox  65.0) (+ oy 15.0) (+ ox 135.0) (+ oy 30.0) *gr:h1*)
+  (gr:fill (+ ox  65.0) (+ oy  0.0) (+ ox 135.0) (+ oy 15.0) *gr:h1*)
+  (gr:fill (+ ox 135.0) (+ oy  0.0) (+ ox 185.0) (+ oy 15.0) *gr:h1*)
+  T)
+
+;;; ======================================================================
+;;;  ЛИСТ И РАМКА
+;;; ======================================================================
+
+(defun gr:sheet (w h / x1 y1 x2 y2)
+  ;; обрез листа
+  (gr:ln 0.0 0.0 w 0.0 *gr:lwsheet*)
+  (gr:ln w 0.0 w h *gr:lwsheet*)
+  (gr:ln w h 0.0 h *gr:lwsheet*)
+  (gr:ln 0.0 h 0.0 0.0 *gr:lwsheet*)
+
+  ;; внутренняя рамка
+  (setq x1 *gr:mleft*  y1 *gr:medge*
+        x2 (- w *gr:medge*) y2 (- h *gr:medge*))
+  (gr:ln x1 y1 x2 y1 *gr:lwline*)
+  (gr:ln x1 y2 x2 y2 *gr:lwline*)
+  (gr:ln x1 y1 x1 y2 *gr:lwline*)
+  (gr:ln x2 y1 x2 y2 *gr:lwline*)
+
+  ;; метка формата в полосе под рамкой, у правого края
+  (list x1 y1 x2 y2))
+
+;;; ======================================================================
+;;;  ОПРЕДЕЛЕНИЕ БЛОКА
+;;;  entmake BLOCK ... ENDBLK собирает определение прямо в чертеже.
+;;;  Точка вставки рамки - левый нижний угол листа, штампа - его правый
+;;;  нижний угол: так удобнее цеплять штамп к готовой рамке.
+;;; ======================================================================
+
+(defun gr:size (name / fmt ori rec)
+  (setq fmt (substr name 2 1)
+        ori (substr name 4)
+        rec (assoc fmt *gr:fmts*))
+  (if rec
+    (if (= ori "vert")
+      (list (caddr rec) (cadr rec) fmt)
+      (list (cadr rec) (caddr rec) fmt))))
+
+(defun gr:def (name / f w h in)
+  (gr:mkstyle)                               ; стиль - до открытия блока
+  (regapp "ADDCAD")                          ; и регистрация XDATA тоже
+  (cond
+    ((tblsearch "BLOCK" name) name)          ; уже собран в этом сеансе
+    ((= name "shtamp")
+     (entmake (list '(0 . "BLOCK") (cons 2 name) (cons 70 0)
+                    (list 10 0.0 0.0 0.0)))
+     (gr:stamp (- *gr:sw*) 0.0)
+     (entmake '((0 . "ENDBLK")))
+     name)
+    ((setq f (gr:size name))
+     (setq w (car f) h (cadr f))
+     (entmake (list '(0 . "BLOCK") (cons 2 name) (cons 70 0)
+                    (list 10 0.0 0.0 0.0)))
+     (setq in (gr:sheet w h))
+     (gr:stamp (- (caddr in) *gr:sw*) (cadr in))
+     (gr:cell (- w 25.0) 0.0 (- w 5.0) *gr:medge* *gr:h2* 0.90 0.0
+              (strcat "Формат А" (caddr f)) nil)
+     (entmake '((0 . "ENDBLK")))
+     name)
+    (T nil)))
+
+;;; ======================================================================
+;;;  ВСТАВКА
+;;;  PAUSE отдаёт указание точки самой команде -ВСТАВИТЬ, поэтому блок
+;;;  висит на курсоре и сразу видно, как он встанет.
+;;;
+;;;  *gr:scale* = nil    - динамический режим: после вставки сразу МАСШТАБ
+;;;  *gr:scale* = число  - фиксированный: масштаб задаётся до точки вставки,
+;;;                        и на курсоре блок уже нужного размера.
+;;;
+;;;  command вызывается напрямую: обернуть его в vl-catch-all-apply нельзя,
+;;;  AutoLISP отвечает "неверная порядковая функция: COMMAND".
+;;; ======================================================================
+
+(defun gr:insert (name / prev ent pt sc e)
+  (if (null (gr:def name))
+    (progn (princ "\nAddCAD/Рамки: неизвестный формат.") nil)
     (progn
-      (setq file (strcat dir name ".dwg"))
-      ;; путь берём в кавычки: иначе пробелы в нём будут восприняты как Enter
-      (setq src (if (tblsearch "BLOCK" name) name (strcat "\"" file "\"")))
       (setq prev (entlast))
 
       (if *gr:scale*
-        (command "_.-INSERT" src "_S" *gr:scale* PAUSE 0)
-        (command "_.-INSERT" src PAUSE 1 1 0))
+        (command "_.-INSERT" name "_S" *gr:scale* PAUSE 0)
+        (command "_.-INSERT" name PAUSE 1 1 0))
 
       (setq ent (entlast))
       (if (and ent (not (eq ent prev)))
@@ -190,23 +354,207 @@
                   (princ (strcat "\nМасштаб рамки: " (rtos sc 2 4)))))))
           (if (entget ent)
             (progn
-              ;; prev - последний объект до вставки: всё, что появится
-              ;; после взрыва, идёт по цепочке за ним
               (command "_.EXPLODE" ent)
-              (gr:addlabels prev sc)))))
+              ;; Всё, что появилось после взрыва, идёт по цепочке за prev:
+              ;; берём свои надписи под наблюдение сразу, чтобы автоподгонка
+              ;; заработала с первой же правки.
+              ;;
+              ;; Размеры в метке пересчитывать не надо: тип 1041 - это
+              ;; "расстояние", и при взрыве масштабированной вставки
+              ;; AutoCAD масштабирует такие значения сам. Проверено:
+              ;; в рамке масштаба 5 метка стала 590 / 40 / 15.
+              (setq e prev)
+              (while (setq e (if e (entnext e) (entnext)))
+                (gr:watch e))))))
 
       (command "_.-PURGE" "_Blocks" name "_No")
       T)))
 
-;;; --- общее тело команды -----------------------------------------------
+;;; ======================================================================
+;;;  ОКРУЖЕНИЕ И ОШИБКИ
+;;; ======================================================================
 
-(defun gr:frame (name)
+(defun gr:save ()
+  (setq *gr:vars*
+    (list (getvar "CMDECHO") (getvar "ATTREQ") (getvar "ATTDIA")
+          (getvar "OSMODE") (getvar "CLAYER")))
+  (setvar "CMDECHO" 0)
+  (setvar "ATTREQ" 0)
+  (setvar "ATTDIA" 0)
+  (setvar "OSMODE" 0))
+
+(defun gr:restore ()
+  (if *gr:vars*
+    (progn
+      (setvar "CMDECHO" (nth 0 *gr:vars*))
+      (setvar "ATTREQ"  (nth 1 *gr:vars*))
+      (setvar "ATTDIA"  (nth 2 *gr:vars*))
+      (setvar "OSMODE"  (nth 3 *gr:vars*))
+      (if (tblsearch "LAYER" (nth 4 *gr:vars*))
+        (setvar "CLAYER" (nth 4 *gr:vars*)))
+      (setq *gr:vars* nil))))
+
+;;; Если прервали Esc на этапе масштабирования, вставленный блок остаётся
+;;; висеть в чертеже. Считаем отмену отменой и убираем его.
+(defun gr:err (msg)
+  (if (and *gr:pending* (entget *gr:pending*))
+    (entdel *gr:pending*))
+  (setq *gr:pending* nil)
+  (gr:restore)
+  (if (and msg (not (wcmatch (strcase msg) "*ОТМЕНА*,*CANCEL*,*QUIT*")))
+    (princ (strcat "\nAddCAD/Рамки: " msg)))
+  (setq *error* *gr:olderr* *gr:olderr* nil)
+  (princ))
+
+;;; ======================================================================
+;;;  ВПИСЫВАНИЕ ТЕКСТА В ГРАФУ
+;;;
+;;;  Своего "уменьшайся, если не влезает" у мтекста нет: заданная ширина
+;;;  переносит строки, но высота остаётся прежней, и длинная надпись
+;;;  вылезает вверх и вниз за линии графы. Поэтому подгоняем сами.
+;;;
+;;;  Размеры графы лежат в самом тексте (XDATA "ADDCAD"), так что подгонка
+;;;  не зависит ни от того, где стоит рамка, ни от её масштаба: значения
+;;;  типа 1041 AutoCAD масштабирует вместе с объектом.
+;;; ======================================================================
+
+;;; (полезная_ширина полезная_высота исходная_высота_шрифта) или nil
+(defun gr:xd (e / x)
+  (setq x (cdr (assoc -3 (entget e '("ADDCAD")))))
+  (if x
+    (progn
+      (setq x (cdar x))
+      (if (and (>= (length x) 4) (= (cdr (nth 0 x)) "cell"))
+        (list (cdr (nth 1 x)) (cdr (nth 2 x)) (cdr (nth 3 x)))))))
+
+;;; фактическая высота текстового блока
+(defun gr:boxh (o / mn mx)
+  (vla-GetBoundingBox o 'mn 'mx)
+  (- (cadr (vlax-safearray->list mx))
+     (cadr (vlax-safearray->list mn))))
+
+;;; Подогнать одну надпись. Сначала возвращаем исходную высоту - иначе
+;;; текст, однажды ужатый, так и остался бы мелким после сокращения.
+;;; Дальше уменьшаем шагами по 8%, но не мельче 40% от исходного:
+;;; совсем крошечная надпись в чертеже бесполезна.
+(defun gr:fit1 (e / o d uw uh h0 cur n)
+  (if (setq d (gr:xd e))
+    (progn
+      (setq o  (vlax-ename->vla-object e)
+            uw (car d) uh (cadr d) h0 (caddr d)
+            cur h0 n 0)
+      (vla-put-Width o uw)
+      (vla-put-Height o cur)
+      (while (and (> (gr:boxh o) uh) (> cur (* 0.4 h0)) (< n 30))
+        (setq cur (* cur 0.92) n (1+ n))
+        (vla-put-Height o cur))
+      (/ cur h0))))
+
+;;; то же самое, но для объекта ActiveX - так удобнее реактору
+(defun gr:fito (o)
+  (gr:fit1 (vlax-vla-object->ename o)))
+
+;;; Подогнать набор. Заодно берём надписи под наблюдение: в чертеже,
+;;; который только что открыли, реакторов ещё нет.
+;;; Возвращает, сколько надписей пришлось уменьшить.
+(defun gr:fitss (ss / i e k r)
+  (setq i 0 k 0)
+  (while (< i (sslength ss))
+    (setq e (ssname ss i)
+          r (vl-catch-all-apply 'gr:fit1 (list e)))
+    (gr:watch e)
+    (if (and (numberp r) (< r 0.999)) (setq k (1+ k)))
+    (setq i (1+ i)))
+  k)
+
+;;; все наши надписи в чертеже
+(defun gr:allfills ()
+  (ssget "_X" '((0 . "MTEXT") (-3 ("ADDCAD")))))
+
+;;; --- автоматический режим ---------------------------------------------
+;;;
+;;;  Область действия сужена дважды, чтобы автоматика не лезла куда
+;;;  не просят:
+;;;
+;;;  1. Реактор вешается ТОЛЬКО на надписи с меткой ADDCAD - те, что
+;;;     плагин сам поставил в графы штампа. Чужой текст в чертеже -
+;;;     заголовки, выноски, что угодно - реактора не имеет и остаётся
+;;;     нетронутым, даже если его правят той же командой.
+;;;
+;;;  2. Подгоняется только та надпись, которую действительно изменили.
+;;;     Остальные графы, включая соседние рамки, не пересчитываются:
+;;;     если вы там нарочно поменяли высоту, она такой и останется.
+;;;
+;;;  Правку ловит объектный реактор, но менять объект прямо в его
+;;;  обработчике нельзя - AutoCAD этого не любит. Поэтому обработчик
+;;;  только помечает объект как изменённый, а сама подгонка идёт
+;;;  по окончании команды.
+
+(setq *gr:autofit* T)      ; автоподгонка включена
+(setq *gr:watched* nil)    ; за какими надписями уже следим
+(setq *gr:dirty*   nil)    ; что правили и надо подогнать
+(setq *gr:busy*    nil)    ; защита от самозапуска: подгонка сама меняет объект
+
+(defun gr:onmod (o r args)
+  (if (and *gr:autofit* (not *gr:busy*) (not (member o *gr:dirty*)))
+    (setq *gr:dirty* (cons o *gr:dirty*))))
+
+(defun gr:oncmd (r args)
+  (if *gr:dirty*
+    (progn
+      (setq *gr:busy* T)
+      (foreach o *gr:dirty*
+        (vl-catch-all-apply
+          '(lambda ()
+             (if (not (vlax-erased-p o)) (gr:fito o)))))
+      (setq *gr:dirty* nil
+            *gr:busy*  nil))))
+
+;;; повесить наблюдение на одну надпись
+(defun gr:watch (e / o)
+  (if (and e (gr:xd e))
+    (progn
+      (setq o (vlax-ename->vla-object e))
+      (if (not (member o *gr:watched*))
+        (progn
+          (vlr-object-reactor (list o) "addcad-fit"
+                              '((:vlr-modified . gr:onmod)))
+          (setq *gr:watched* (cons o *gr:watched*)))))))
+
+;;; повесить наблюдение на все свои надписи в чертеже. Объектные реакторы
+;;; не сохраняются в файле, поэтому при открытии чертежа их надо ставить
+;;; заново - этим и занимается вызов при загрузке файла.
+(defun gr:scan ( / ss i)
+  (setq i 0)
+  (if (setq ss (gr:allfills))
+    (while (< i (sslength ss))
+      (gr:watch (ssname ss i))
+      (setq i (1+ i))))
+  (length *gr:watched*))
+
+(if (not *gr:reactor*)
+  (setq *gr:reactor*
+    (vlr-command-reactor nil '((:vlr-commandEnded . gr:oncmd)))))
+
+;;; ======================================================================
+;;;  ОБЩЕЕ ТЕЛО КОМАНДЫ
+;;; ======================================================================
+
+(defun gr:layer (name)
+  (if (null (tblsearch "LAYER" name))
+    (command "_.-LAYER" "_Make" name "")
+    (setvar "CLAYER" name)))
+
+(defun gr:run (layer name)
   (setq *gr:olderr* *error*  *error* gr:err)
   (gr:save)
+  (gr:layer layer)
   (gr:insert name)
   (gr:restore)
   (setq *error* *gr:olderr* *gr:olderr* nil)
   (princ))
+
+(defun gr:frame (name) (gr:run "рамка" name))
 
 ;;; быстрая вставка отличается только тем, что формат уже известен
 (defun gr:quick (name) (gr:frame name))
@@ -223,11 +571,11 @@
   (initget "0 1 2 3 4")
   (setq fmt (getkword (strcat "\nФормат А [0/1/2/3/4] <" *gr:fmt* ">: ")))
   (if fmt (setq *gr:fmt* fmt))
-  (initget "Горизонтально Вертикально")
+  (initget "Альбомная Книжная")
   (setq ori (getkword
-              (strcat "\nОриентация [Горизонтально/Вертикально] <"
-                      (if (= *gr:ori* "gor") "Г" "В") ">: ")))
-  (if ori (setq *gr:ori* (if (= ori "Горизонтально") "gor" "vert")))
+              (strcat "\nОриентация [Альбомная/Книжная] <"
+                      (if (= *gr:ori* "gor") "Альбомная" "Книжная") ">: ")))
+  (if ori (setq *gr:ori* (if (= ori "Альбомная") "gor" "vert")))
   (gr:frame (strcat "A" *gr:fmt* "_" *gr:ori*)))
 
 (defun c:ARAMKA () (c:АРАМКА))
@@ -255,32 +603,69 @@
 (defun c:РАМКАМАСШТАБ () (c:АМАСШТАБ))
 (defun c:RAMKASCALE   () (c:АМАСШТАБ))
 
+;;; АВПИСАТЬ - подогнать надписи под свои графы
+
+(defun c:АВПИСАТЬ ( / ss k)
+  (princ "\nВыберите надписи для подгонки (Enter - все в чертеже): ")
+  (setq ss (ssget '((0 . "MTEXT") (-3 ("ADDCAD")))))
+  (if (null ss) (setq ss (gr:allfills)))
+  (if (null ss)
+    (princ "\nВ чертеже нет надписей AddCAD.")
+    (progn
+      (setq k (gr:fitss ss))
+      (princ (strcat "\nПроверено надписей: " (itoa (sslength ss))
+                     ", уменьшено: " (itoa k)))))
+  (princ))
+
+(defun c:AFIT    () (c:АВПИСАТЬ))
+(defun c:ВПИСАТЬ () (c:АВПИСАТЬ))
+
+;;; АВТОВПИСАТЬ - включить или выключить автоматическую подгонку
+
+(defun c:АВТОВПИСАТЬ ( / a)
+  (initget "Вкл Выкл")
+  (setq a (getkword (strcat "\nАвтоподгонка надписей [Вкл/Выкл] <"
+                            (if *gr:autofit* "Вкл" "Выкл") ">: ")))
+  (cond ((= a "Вкл")  (setq *gr:autofit* T))
+        ((= a "Выкл") (setq *gr:autofit* nil)))
+  (princ (strcat "\nАвтоподгонка: "
+                 (if *gr:autofit*
+                   "включена - после правки текста надпись сама уложится в графу"
+                   "выключена - подгонять вручную командой АВПИСАТЬ")))
+  (princ))
+
+(defun c:AUTOFIT () (c:АВТОВПИСАТЬ))
+
 ;;; АШТАМП - вставка штампа на отдельный слой
 
-(defun c:АШТАМП ()
-  (setq *gr:olderr* *error*  *error* gr:err)
-  (gr:save)
-  (if (null (tblsearch "LAYER" "Штамп"))
-    (command "_.-LAYER" "_Make" "Штамп" "")
-    (setvar "CLAYER" "Штамп"))
-  (gr:insert "shtamp")
-  (gr:restore)
-  (setq *error* *gr:olderr* *gr:olderr* nil)
-  (princ))
+(defun c:АШТАМП () (gr:run "Штамп" "shtamp"))
 
 (defun c:ASHTAMP () (c:АШТАМП))
 (defun c:ШТАМП   () (c:АШТАМП))
 (defun c:SHTAMP  () (c:АШТАМП))
 
-;;; --- быстрые команды Р0Г..Р4В и R0G..R4V ------------------------------
-;;; Определяются циклом, чтобы не плодить два десятка одинаковых defun.
+;;; --- быстрые команды --------------------------------------------------
+;;; Альбомная: Р0А..Р4А, книжная: Р0К..Р4К. Латиницей - R0L..R4L (landscape)
+;;; и R0P..R4P (portrait).
+;;;
+;;; Прежние имена Р0Г..Р4В и R0G..R4V оставлены синонимами: ориентации
+;;; переименованы в альбомную и книжную, но ломать набранную привычку
+;;; из-за этого незачем.
+;;;
+;;; Всё определяется циклом, чтобы не плодить четыре десятка одинаковых defun.
 
 (foreach f '("0" "1" "2" "3" "4")
-  (foreach o '(("gor" "Г" "G") ("vert" "В" "V"))
-    (eval (list 'defun (read (strcat "c:Р" f (cadr o)))  '()
-                (list 'gr:quick (strcat "A" f "_" (car o)))))
-    (eval (list 'defun (read (strcat "c:R" f (caddr o))) '()
-                (list 'gr:quick (strcat "A" f "_" (car o)))))))
+  (foreach o '(("gor"  "РА" "РГ" "RL" "RG")
+               ("vert" "РК" "РВ" "RP" "RV"))
+    (foreach nm (cdr o)
+      (eval (list 'defun
+                  (read (strcat "c:" (substr nm 1 1) f (substr nm 2 1)))
+                  '()
+                  (list 'gr:quick (strcat "A" f "_" (car o))))))))
 
-(princ "\nAddCAD/Рамки. Команды: АРАМКА, АШТАМП, быстрые Р3Г / Р4В и т.п.")
+;;; Объектные реакторы в файле не сохраняются: при открытии чертежа
+;;; берём свои надписи под наблюдение заново.
+(gr:scan)
+
+(princ "\nAddCAD/Рамки. Команды: АРАМКА, АШТАМП, быстрые Р3А / Р4К и т.п.")
 (princ)

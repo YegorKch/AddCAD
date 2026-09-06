@@ -6,10 +6,15 @@
 """
 import base64
 import os
+import re
 import sys
 
 ZIP = sys.argv[1]
 OUT = sys.argv[2]
+
+# версию не дублируем руками - берём из имени архива AddCAD-X.Y.Z.zip
+m = re.search(r'(\d+\.\d+\.\d+)', os.path.basename(ZIP))
+VER = m.group(1) if m else ''
 
 HEAD = r'''@echo off
 chcp 1251 >nul
@@ -17,7 +22,7 @@ setlocal
 title AddCAD - установка
 
 echo ------------------------------------------
-echo   AddCAD 1.0.0 - установка
+echo   AddCAD %VER% - установка
 echo ------------------------------------------
 echo.
 
@@ -60,7 +65,7 @@ data = base64.b64encode(open(ZIP, 'rb').read()).decode('ascii')
 lines = [data[i:i + 76] for i in range(0, len(data), 76)]
 
 with open(OUT, 'wb') as f:
-    f.write(HEAD.replace('\n', '\r\n').encode('cp1251'))
+    f.write(HEAD.replace('%VER%', VER).replace('\n', '\r\n').encode('cp1251'))
     f.write(('\r\n'.join(lines) + '\r\n').encode('ascii'))
 
 print('установщик:', OUT)

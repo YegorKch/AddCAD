@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Сборка GeoRamki.cuix.
+"""Сборка AddCAD.cuix - ленты плагина.
 
-Формат сверен с рабочими файлами адаптации AutoCAD: BMP-иконки
+Формат сверен с рабочими файлами адаптации AutoCAD: PNG-иконки
 и UID со стандартными префиксами MMU_/RBNU_/XLS_/TBB_.
 """
 import os
@@ -36,29 +36,23 @@ macros = []
 FMT = {'0': 'А0', '1': 'А1', '2': 'А2', '3': 'А3', '4': 'А4'}
 n = 0
 for f in '01234':
-    for suf, ru, lat in (('gor', 'горизонтально', 'G'),
-                         ('vert', 'вертикально', 'V')):
+    for suf, ru, lat in (('gor', 'альбомная', 'G'),
+                         ('vert', 'книжная', 'V')):
         n += 1
         macros.append(('MMU_GR_%03d' % n,
-                       'Формат %s (%s)' % (FMT[f], ru),
+                       'Формат %s, %s' % (FMT[f], ru),
                        'R%s%s' % (f, lat),
-                       'Рамка %s, %s' % (FMT[f], ru),
+                       'Рамка %s, %s ориентация' % (FMT[f], ru),
                        'A%s_%s' % (f, suf)))
 n += 1
 MAC_SHTAMP = 'MMU_GR_%03d' % n
 macros.append((MAC_SHTAMP, 'Штамп', 'ASHTAMP',
                'Вставка штампа на слой "Штамп"', 'shtamp'))
-n += 1
-MAC_RAMKA = 'MMU_GR_%03d' % n
-macros.append((MAC_RAMKA, 'Рамка (выбор формата)', 'ARAMKA',
-               'Выбор формата, ориентации и масштаба', 'A3_gor'))
-n += 1
-MAC_SCALE = 'MMU_GR_%03d' % n
-macros.append((MAC_SCALE, 'Масштаб', 'ASCALE',
-               'Масштаб вставки рамок по умолчанию', 'A3_gor'))
+# Отдельных кнопок под АРАМКА и АМАСШТАБ на ленте нет: из выпадающего
+# списка формат выбирается быстрее, чем через вопросы в командной строке.
+# Сами команды никуда не делись - работают набором с клавиатуры.
 
-FORMAT_MACROS = [m for m in macros if m[0] not in
-                 (MAC_SHTAMP, MAC_RAMKA, MAC_SCALE)]
+FORMAT_MACROS = [m for m in macros if m[0] != MAC_SHTAMP]
 
 # --- MenuGroup.cui ----------------------------------------------------
 mg = [HDR, '<MenuGroup %s Name="%s" DisplayName="%s">\n' % (NS, GROUP, DISPLAY),
@@ -72,8 +66,8 @@ for i, (uid, label, c, tip, icon) in enumerate(macros):
         '        <Name xlate="true" UID="XLS_GR_N%03d">%s</Name>\n'
         '        <Command>%s</Command>\n'
         '        <HelpString xlate="true" UID="XLS_GR_H%03d">%s</HelpString>\n'
-        '        <SmallImage Name="%s_16.bmp" />\n'
-        '        <LargeImage Name="%s_32.bmp" />\n'
+        '        <SmallImage Name="%s_16.png" />\n'
+        '        <LargeImage Name="%s_32.png" />\n'
         '      </Macro>\n'
         '    </MenuMacro>\n'
         % (uid, REV, i, esc(label), esc(cmd(c)), i, esc(tip), icon, icon))
@@ -107,24 +101,35 @@ rb = [HDR, '<RibbonRoot>\n', '  <RibbonPanelSourceCollection %s>\n' % NS,
       '      <RibbonRow UID="RBNU_GR_ROW1">\n',
       '        %s\n' % REV]
 
-# выпадающий список форматов
+# --- выпадающий список форматов ---------------------------------------
+#
+# Картинка этой кнопки - отдельная история, на ней легко потерять час.
+# Проверено на AutoCAD 2025:
+#
+#   1. У макросов картинка живёт внутри cuix: <SmallImage Name="..."/>.
+#      Так работают значки пунктов списка.
+#   2. У RibbonSplitButton так НЕ работает - ни атрибутом, ни дочерним
+#      элементом: на кнопке вылезает облако с вопросительным знаком.
+#      Свою картинку она ищет как ФАЙЛ по путям поиска вспомогательных
+#      файлов. Поэтому ramka_16/32.png кладутся ещё и рядом с cuix,
+#      а установщик добавляет эту папку в пути поиска профиля.
+#      Объявления Support Path в PackageContents.xml для этого мало:
+#      в список путей оно не попадает, проверено.
+#   3. Без картинки кнопка остаётся вовсе без значка - на значок первого
+#      пункта списка AutoCAD не переключается.
+#   4. Формат именно PNG: прозрачные пиксели BMP лента рисует чёрным.
+SPLIT_IMG = 'SmallImage="ramka_16.png" LargeImage="ramka_32.png" '
+SPLIT_BEHAVIOR = 'DropDownNoFollow'
 rb.append('        <RibbonSplitButton UID="RBNU_GR_SPLIT" '
           'Id="AcRibbonSplitButton" Text="Рамка и штамп" '
-          'SmallImage="A3_gor_16.bmp" LargeImage="A3_gor_32.bmp" '
-          'Behavior="DropDownNoFollow" ListStyle="IconText" '
+          '%s'
+          'Behavior="%s" ListStyle="IconText" '
           'ButtonStyle="LargeWithText" Grouping="false">\n'
-          '          %s\n' % REV)
+          '          %s\n' % (SPLIT_IMG, SPLIT_BEHAVIOR, REV))
 for uid, label, c, tip, icon in FORMAT_MACROS:
     rb.append(rbtn(uid, 'SmallWithoutText', label))
 rb.append(rbtn(MAC_SHTAMP, 'SmallWithoutText', 'Штамп'))
 rb.append('        </RibbonSplitButton>\n')
-
-rb.append('        <RibbonSeparator UID="RBNU_GR_SEP" '
-          'Id="AcRibbonSeparator" SeparatorStyle="Line" />\n')
-
-# рядом - две обычные большие кнопки, без вложенных рядов
-rb.append(rbtn(MAC_RAMKA, 'LargeWithText', 'Рамка с выбором формата'))
-rb.append(rbtn(MAC_SCALE, 'LargeWithText', 'Масштаб вставки'))
 
 rb.append('      </RibbonRow>\n')
 rb.append('    </RibbonPanelSource>\n  </RibbonPanelSourceCollection>\n')
@@ -188,7 +193,7 @@ parts = [
     ('LSPFiles.cui', empty('LSPFiles')),
 ]
 
-icons = sorted(x for x in os.listdir(ICONS) if x.endswith('.bmp'))
+icons = sorted(x for x in os.listdir(ICONS) if x.endswith('.png'))
 
 rels = ['<?xml version="1.0" encoding="utf-8"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/'
@@ -208,7 +213,7 @@ CT = ('<?xml version="1.0" encoding="utf-8"?>'
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/'
       'content-types">'
       '<Default Extension="cui" ContentType="text/xml" />'
-      '<Default Extension="bmp" ContentType="image/bmp" />'
+      '<Default Extension="png" ContentType="image/png" />'
       '<Default Extension="xml" ContentType="text/xml" />'
       '<Default Extension="rels" ContentType="application/'
       'vnd.openxmlformats-package.relationships+xml" />'
@@ -245,6 +250,16 @@ with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as z:
     for name in icons:
         z.write(os.path.join(ICONS, name), name)
 
+# Картинку кнопки-списка кладём ещё и файлом рядом с cuix: внутри архива
+# AutoCAD её для этой кнопки не видит, а Contents прописан как Support Path.
+import shutil
+
+side = os.path.dirname(os.path.abspath(OUT))
+for name in ('ramka_16.png', 'ramka_32.png'):
+    src = os.path.join(ICONS, name)
+    if os.path.exists(src):
+        shutil.copy2(src, os.path.join(side, name))
+
 print('собран:', OUT, os.path.getsize(OUT), 'байт')
 print('макросов:', len(macros), '| в списке форматов:', len(FORMAT_MACROS) + 1,
-      '| иконок:', len(icons))
+      '| иконок:', len(icons), '| рядом положены ramka_16/32.png')
